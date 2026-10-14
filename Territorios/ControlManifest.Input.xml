@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<manifest>
+  <control namespace="sec" constructor="Territorios" version="0.0.5" display-name-key="Territorios" description-key="Mapa de Territorios de Field Service por Códigos Postales con Azure Maps" control-type="standard">
+    <external-service-usage enabled="true">
+      <domain>atlas.microsoft.com</domain>
+      <domain>*.dynamics.com</domain>
+    </external-service-usage>
+
+    <!-- Propiedad del campo donde se enlaza el PCF en el formulario -->
+    <property name="value" display-name-key="Campo Enlazado" description-key="Campo del formulario donde se aloja el control" of-type="SingleLine.Text" usage="bound" required="false" />
+
+    <!-- Clave de suscripción de Azure Maps -->
+    <property name="azureMapsKey" display-name-key="Azure Maps Subscription Key" description-key="Clave principal o secundaria de tu cuenta de Azure Maps" of-type="SingleLine.Text" usage="input" required="true" />
+
+    <!-- URL del archivo TopoJSON (ej. /WebResources/sec_codigos_postales_es.js) -->
+    <property name="topoJsonUrl" display-name-key="URL del archivo TopoJSON" description-key="Ruta relativa del recurso web (ej. /WebResources/sec_codigos_postales_es.js) o URL externa con el TopoJSON de Mapshaper" of-type="SingleLine.Text" usage="input" required="false" />
+
+    <!-- URL opcional del entorno externo de Dataverse con datos de prueba -->
+    <property name="targetEnvironmentUrl" display-name-key="URL Entorno Dataverse Externo (Opcional)" description-key="Ej: https://org-datos.crm4.dynamics.com. Si está vacío, usa el entorno actual." of-type="SingleLine.Text" usage="input" required="false" />
+
+    <!-- Token Bearer opcional para autenticar contra el entorno externo -->
+    <property name="targetAccessToken" display-name-key="Bearer Token Entorno Externo (Opcional)" description-key="Token OAuth2 para consultar el entorno externo si es distinto al actual" of-type="SingleLine.Text" usage="input" required="false" />
+
+    <resources>
+      <code path="index.ts" order="1"/>
+      <css path="css/Territorios.css" order="1" />
+    </resources>
+
+    <feature-usage>
+      <uses-feature name="WebAPI" required="true" />
+    </feature-usage>
+  </control>
+</manifest>
