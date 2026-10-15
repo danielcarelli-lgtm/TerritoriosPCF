@@ -6,7 +6,7 @@
     flex-direction: column;
     width: 100%;
     height: 680px;
-    min-height: 500px;
+    min-height: 540px;
     border: 1px solid #e2e8f0;
     border-radius: 8px;
     overflow: hidden;
@@ -24,7 +24,7 @@
     padding: 10px 14px;
     background-color: #ffffff;
     border-bottom: 1px solid #e2e8f0;
-    z-index: 2;
+    z-index: 20;
 }
 
 .sec-territorios-toolbar-left,
@@ -76,6 +76,7 @@
     background-color: #f8fafc;
     border-bottom: 1px solid #cbd5e1;
     font-size: 12px;
+    z-index: 20;
 }
 
 .sec-territorios-env-bar.open {
@@ -127,14 +128,163 @@
     position: relative;
     width: 100%;
     height: 100%;
+    min-height: 480px;
     overflow: hidden;
 }
 
-.sec-territorios-map {
+.sec-territorios-map-stage {
     flex: 1;
     width: 100%;
     height: 100%;
+    min-height: 480px;
     position: relative;
+    overflow: hidden;
+    background-color: #dbeafe;
+}
+
+.sec-territorios-map {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+}
+
+/* Lienzo HTML5 superpuesto que pinta los 10.874 polígonos y burbujas evitando el WebWorker roto */
+.sec-territorios-overlay-canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 6;
+}
+
+/* Controles flotantes de tipo de mapa (Calles / Oscuro / Satélite) y Zoom */
+.sec-territorios-map-controls {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 8px;
+    z-index: 12;
+}
+
+.sec-territorios-style-switcher {
+    display: flex;
+    background: rgba(255, 255, 255, 0.96);
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    box-shadow: 0 2px 6px rgba(15, 23, 42, 0.12);
+    overflow: hidden;
+}
+
+.sec-territorios-style-btn {
+    border: none;
+    background: transparent;
+    padding: 6px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #334155;
+    cursor: pointer;
+    border-right: 1px solid #e2e8f0;
+    transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.sec-territorios-style-btn:last-child {
+    border-right: none;
+}
+
+.sec-territorios-style-btn:hover {
+    background-color: #f1f5f9;
+}
+
+.sec-territorios-style-btn.active {
+    background-color: #0078d4;
+    color: #ffffff;
+}
+
+.sec-territorios-zoom-group {
+    display: flex;
+    flex-direction: column;
+    background: rgba(255, 255, 255, 0.96);
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    box-shadow: 0 2px 6px rgba(15, 23, 42, 0.12);
+    overflow: hidden;
+}
+
+.sec-territorios-zoom-btn {
+    width: 32px;
+    height: 32px;
+    border: none;
+    background: transparent;
+    font-size: 16px;
+    font-weight: 700;
+    color: #1e293b;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-bottom: 1px solid #e2e8f0;
+}
+
+.sec-territorios-zoom-btn:last-child {
+    border-bottom: none;
+}
+
+.sec-territorios-zoom-btn:hover {
+    background-color: #f1f5f9;
+}
+
+/* Tarjeta flotante al hacer clic en un código postal del mapa */
+.sec-territorios-floating-popup {
+    position: absolute;
+    display: none;
+    min-width: 210px;
+    max-width: 280px;
+    background: #ffffff;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    box-shadow: 0 6px 18px rgba(15, 23, 42, 0.18);
+    padding: 10px 12px;
+    font-size: 12px;
+    line-height: 1.45;
+    color: #1e293b;
+    z-index: 15;
+    transform: translate(-50%, calc(-100% - 10px));
+    pointer-events: auto;
+}
+
+.sec-territorios-floating-popup.open {
+    display: block;
+}
+
+.sec-territorios-popup-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.sec-territorios-popup-title {
+    font-weight: 700;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.sec-territorios-popup-close {
+    border: none;
+    background: transparent;
+    font-size: 14px;
+    color: #64748b;
+    cursor: pointer;
+    padding: 0 4px;
 }
 
 .sec-territorios-sidebar {
@@ -144,6 +294,7 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    z-index: 10;
 }
 
 .sec-territorios-sidebar-header {
@@ -223,22 +374,6 @@
     flex-shrink: 0;
 }
 
-.sec-territorios-popup {
-    padding: 10px 12px;
-    font-size: 12px;
-    line-height: 1.45;
-    color: #1e293b;
-}
-
-.sec-territorios-popup-title {
-    font-weight: 700;
-    font-size: 13px;
-    margin-bottom: 4px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}
-
 /* Etiqueta de versionado abajo a la derecha, pequeña y en gris */
 .sec-territorios-version {
     position: absolute;
@@ -251,5 +386,5 @@
     border-radius: 4px;
     pointer-events: none;
     user-select: none;
-    z-index: 10;
+    z-index: 25;
 }

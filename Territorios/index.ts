@@ -18,10 +18,29 @@ interface TerritoryInfo {
     maxLat: number;
 }
 
+interface PreparedPolygon {
+    cpCode: string;
+    territoryId: string;
+    assigned: boolean;
+    ringsLonLat: [number, number][][];
+    ringsMercator: [number, number][][];
+    minLon: number;
+    minLat: number;
+    maxLon: number;
+    maxLat: number;
+    minMx: number;
+    minMy: number;
+    maxMx: number;
+    maxMy: number;
+}
+
 interface DataverseQueryResult {
     entities: Record<string, unknown>[];
     nextLink?: string;
 }
+
+type MapStyleMode = "road" | "dark" | "satellite";
+type BadgeDisplayMode = "full" | "compact" | "none";
 
 // Paleta de 20 colores diferenciados de alto contraste para distinguir cada territorio
 const TERRITORY_PALETTE: string[] = [
@@ -32,7 +51,7 @@ const TERRITORY_PALETTE: string[] = [
 ];
 
 export class Territorios implements ComponentFramework.StandardControl<IInputs, IOutputs> {
-    private static readonly CONTROL_VERSION = "v0.0.5";
+    private static readonly CONTROL_VERSION = "v0.0.7";
 
     private _context: ComponentFramework.Context<IInputs>;
     private _container: HTMLDivElement;
@@ -44,17 +63,22 @@ export class Territorios implements ComponentFramework.StandardControl<IInputs, 
     private _envConfigBarEl: HTMLDivElement;
     private _envUrlInputEl: HTMLInputElement;
     private _envTokenInputEl: HTMLInputElement;
+    private _mapStageEl: HTMLDivElement;
     private _mapContainerEl: HTMLDivElement;
+    private _overlayCanvasEl: HTMLCanvasElement;
+    private _floatingPopupEl: HTMLDivElement;
     private _legendListEl: HTMLDivElement;
     private _fileInputEl: HTMLInputElement;
     private _toggleBordersBtn: HTMLButtonElement;
+    private _toggleBadgesBtn: HTMLButtonElement;
+    private _styleButtons: Map<MapStyleMode, HTMLButtonElement> = new Map<MapStyleMode, HTMLButtonElement>();
 
-    // Instancias de Azure Maps
+    // Instancias de Azure Maps y Capas Raster (TileLayer)
     private _map: atlas.Map | null = null;
-    private _polygonDataSource: atlas.source.DataSource | null = null;
-    private _centroidDataSource: atlas.source.DataSource | null = null;
-    private _cpBorderLayer: atlas.layer.LineLayer | null = null;
-    private _popup: atlas.Popup | null = null;
+    private _mapReady = false;
+    private _baseTileLayer: atlas.layer.TileLayer | null = null;
+    private _hybridOverlayTileLayer: atlas.layer.TileLayer | null = null;
+    private _resizeObserver: ResizeObserver | null = null;
 
     // Estado de configuración y datos en memoria
     private _currentKey = "";
@@ -63,13 +87,25 @@ export class Territorios implements ComponentFramework.StandardControl<IInputs, 
     private _targetAccessToken = "";
     private _manualOverrideEnv = false;
     private _showInternalBorders = false;
+    private _badgeMode: BadgeDisplayMode = "compact";
+    private _currentStyleMode: MapStyleMode = "road";
+    private _selectedCpPolygon: PreparedPolygon | null = null;
+    private _popupPositionLonLat: [number, number] | null = null;
 
     private _baseGeoJson: GeoJSON.FeatureCollection<GeoJSON.Geometry> | null = null;
+    private _preparedPolygons: PreparedPolygon[] = [];
     private _cpToTerritoryMap: Map<string, string> = new Map<string, string>();
     private _territoriesMap: Map<string, TerritoryInfo> = new Map<string, TerritoryInfo>();
 
+    // Puntos de referencia en España para sincronizar proyección Web Mercator con Azure Maps
+    private readonly _refPoint1: [number, number] = [-9.5, 43.8];
+    private readonly _refPoint2: [number, number] = [3.5, 36.0];
+    private readonly _refMerc1: [number, number];
+    private readonly _refMerc2: [number, number];
+
     constructor() {
-        // Constructor vacío requerido por PCF
+        this._refMerc1 = [this.lonToMercatorX(this._refPoint1[0]), this.latToMercatorY(this._refPoint1[1])];
+        this._refMerc2 = [this.lonToMercatorX(this._refPoint2[0]), this.latToMercatorY(this._refPoint2[1])];
     }
 
     public init(
@@ -81,6 +117,7 @@ export class Territorios implements ComponentFramework.StandardControl<IInputs, 
         this._context = context;
         this._container = container;
 
+        this.ensureAzureMapsStylesheet();
         this.buildUI();
         this.initializeOrUpdate(context);
     }
@@ -88,6 +125,17 @@ export class Territorios implements ComponentFramework.StandardControl<IInputs, 
     public updateView(context: ComponentFramework.Context<IInputs>): void {
         this._context = context;
         this.initializeOrUpdate(context);
+    }
+
+    private ensureAzureMapsStylesheet(): void {
+        const cssId = "azure-maps-control-css-v3";
+        if (!document.getElementById(cssId)) {
+            const link = document.createElement("link");
+            link.id = cssId;
+            link.rel = "stylesheet";
+            link.href = "https://atlas.microsoft.com/sdk/javascript/mapcontrol/3/atlas.min.css";
+            document.head.appendChild(link);
+        }
     }
 
     private buildUI(): void {
@@ -120,7 +168,6 @@ export class Territorios implements ComponentFramework.StandardControl<IInputs, 
         const rightGroup = document.createElement("div");
         rightGroup.className = "sec-territorios-toolbar-right";
 
-        // Selector de archivo oculto para cargar TopoJSON local
         this._fileInputEl = document.createElement("input");
         this._fileInputEl.type = "file";
         this._fileInputEl.accept = ".json,.topojson,.geojson,.js";
@@ -149,6 +196,13 @@ export class Territorios implements ComponentFramework.StandardControl<IInputs, 
         this._toggleBordersBtn.textContent = "Bordes CPs: Ocultos";
         this._toggleBordersBtn.addEventListener("click", () => this.toggleInternalBorders());
 
+        this._toggleBadgesBtn = document.createElement("button");
+        this._toggleBadgesBtn.type = "button";
+        this._toggleBadgesBtn.className = "sec-territorios-btn";
+        this._toggleBadgesBtn.textContent = "🏷️ Etiquetas: Nº OTs";
+        this._toggleBadgesBtn.title = "Alternar visualización de burbujas de OTs sobre el mapa";
+        this._toggleBadgesBtn.addEventListener("click", () => this.cycleBadgeMode());
+
         const demoBtn = document.createElement("button");
         demoBtn.type = "button";
         demoBtn.className = "sec-territorios-btn";
@@ -168,6 +222,7 @@ export class Territorios implements ComponentFramework.StandardControl<IInputs, 
         rightGroup.appendChild(loadLocalBtn);
         rightGroup.appendChild(envToggleBtn);
         rightGroup.appendChild(this._toggleBordersBtn);
+        rightGroup.appendChild(this._toggleBadgesBtn);
         rightGroup.appendChild(demoBtn);
         rightGroup.appendChild(reloadBtn);
 
@@ -227,13 +282,90 @@ export class Territorios implements ComponentFramework.StandardControl<IInputs, 
         this._envConfigBarEl.appendChild(applyEnvBtn);
         this._envConfigBarEl.appendChild(clearEnvBtn);
 
-        // 3. Cuerpo principal: Mapa + Leyenda lateral
+        // 3. Cuerpo principal: Escenario del Mapa + Leyenda lateral
         const body = document.createElement("div");
         body.className = "sec-territorios-body";
+
+        this._mapStageEl = document.createElement("div");
+        this._mapStageEl.className = "sec-territorios-map-stage";
 
         this._mapContainerEl = document.createElement("div");
         this._mapContainerEl.className = "sec-territorios-map";
 
+        this._overlayCanvasEl = document.createElement("canvas");
+        this._overlayCanvasEl.className = "sec-territorios-overlay-canvas";
+
+        // Controles propios de estilo de mapa (Calles / Oscuro / Satélite) y Zoom que funcionan sobre TileLayer
+        const mapControls = document.createElement("div");
+        mapControls.className = "sec-territorios-map-controls";
+
+        const styleSwitcher = document.createElement("div");
+        styleSwitcher.className = "sec-territorios-style-switcher";
+
+        const styles: { mode: MapStyleMode; label: string }[] = [
+            { mode: "road", label: "Calles" },
+            { mode: "dark", label: "Oscuro" },
+            { mode: "satellite", label: "Satélite" }
+        ];
+
+        for (const item of styles) {
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = `sec-territorios-style-btn${item.mode === this._currentStyleMode ? " active" : ""}`;
+            btn.textContent = item.label;
+            btn.addEventListener("click", (ev) => {
+                ev.stopPropagation();
+                this.setMapStyleMode(item.mode);
+            });
+            this._styleButtons.set(item.mode, btn);
+            styleSwitcher.appendChild(btn);
+        }
+
+        const zoomGroup = document.createElement("div");
+        zoomGroup.className = "sec-territorios-zoom-group";
+
+        const zoomInBtn = document.createElement("button");
+        zoomInBtn.type = "button";
+        zoomInBtn.className = "sec-territorios-zoom-btn";
+        zoomInBtn.textContent = "+";
+        zoomInBtn.title = "Acercar";
+        zoomInBtn.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            if (this._map) {
+                const cam = this._map.getCamera();
+                this._map.setCamera({ zoom: (cam.zoom ?? 5.5) + 1, type: "ease", duration: 250 });
+            }
+        });
+
+        const zoomOutBtn = document.createElement("button");
+        zoomOutBtn.type = "button";
+        zoomOutBtn.className = "sec-territorios-zoom-btn";
+        zoomOutBtn.textContent = "−";
+        zoomOutBtn.title = "Alejar";
+        zoomOutBtn.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            if (this._map) {
+                const cam = this._map.getCamera();
+                this._map.setCamera({ zoom: Math.max(2, (cam.zoom ?? 5.5) - 1), type: "ease", duration: 250 });
+            }
+        });
+
+        zoomGroup.appendChild(zoomInBtn);
+        zoomGroup.appendChild(zoomOutBtn);
+
+        mapControls.appendChild(styleSwitcher);
+        mapControls.appendChild(zoomGroup);
+
+        // Popup flotante al hacer clic en una zona postal
+        this._floatingPopupEl = document.createElement("div");
+        this._floatingPopupEl.className = "sec-territorios-floating-popup";
+
+        this._mapStageEl.appendChild(this._mapContainerEl);
+        this._mapStageEl.appendChild(this._overlayCanvasEl);
+        this._mapStageEl.appendChild(mapControls);
+        this._mapStageEl.appendChild(this._floatingPopupEl);
+
+        // Barra lateral derecha de Territorios
         const sidebar = document.createElement("div");
         sidebar.className = "sec-territorios-sidebar";
 
@@ -247,7 +379,7 @@ export class Territorios implements ComponentFramework.StandardControl<IInputs, 
         sidebar.appendChild(sidebarHeader);
         sidebar.appendChild(this._legendListEl);
 
-        body.appendChild(this._mapContainerEl);
+        body.appendChild(this._mapStageEl);
         body.appendChild(sidebar);
 
         // 4. Etiqueta de versión abajo a la derecha, pequeña y en gris
@@ -260,6 +392,16 @@ export class Territorios implements ComponentFramework.StandardControl<IInputs, 
         this._wrapperEl.appendChild(body);
         this._wrapperEl.appendChild(versionEl);
         this._container.appendChild(this._wrapperEl);
+
+        if (typeof ResizeObserver !== "undefined") {
+            this._resizeObserver = new ResizeObserver(() => {
+                if (this._map && this._mapReady) {
+                    this._map.resize();
+                    this.drawCanvasOverlay();
+                }
+            });
+            this._resizeObserver.observe(this._mapStageEl);
+        }
     }
 
     private initializeOrUpdate(context: ComponentFramework.Context<IInputs>): void {
@@ -303,6 +445,170 @@ export class Territorios implements ComponentFramework.StandardControl<IInputs, 
             this._envPillEl.textContent = "Entorno: Actual (context.webAPI)";
             this._envPillEl.className = "sec-territorios-env-pill";
         }
+    }
+
+    /**
+     * Construye la URL oficial de teselas rasterizadas de Azure Maps en el dominio europeo
+     * tal y como se implementó en "Integración de Mapas en PCF" (SecuRutas).
+     */
+    private getAzureTileUrl(tilesetId: string): string {
+        return (
+            "https://eu.atlas.microsoft.com/map/tile?api-version=2.1" +
+            "&tilesetId=" + encodeURIComponent(tilesetId) +
+            "&zoom={z}&x={x}&y={y}&tileSize=256" +
+            "&language=es-ES&view=Auto" +
+            "&subscription-key=" + encodeURIComponent(this._currentKey)
+        );
+    }
+
+    /**
+     * Cambia dinámicamente el tipo de mapa (Calles / Oscuro / Satélite) actualizando el TileLayer
+     */
+    private setMapStyleMode(mode: MapStyleMode): void {
+        this._currentStyleMode = mode;
+
+        this._styleButtons.forEach((btn, key) => {
+            if (key === mode) {
+                btn.classList.add("active");
+            } else {
+                btn.classList.remove("active");
+            }
+        });
+
+        if (!this._baseTileLayer || !this._hybridOverlayTileLayer) return;
+
+        if (mode === "road") {
+            this._baseTileLayer.setOptions({
+                tileUrl: this.getAzureTileUrl("microsoft.base.road"),
+                visible: true
+            });
+            this._hybridOverlayTileLayer.setOptions({ visible: false });
+        } else if (mode === "dark") {
+            this._baseTileLayer.setOptions({
+                tileUrl: this.getAzureTileUrl("microsoft.base.darkgrey"),
+                visible: true
+            });
+            this._hybridOverlayTileLayer.setOptions({ visible: false });
+        } else if (mode === "satellite") {
+            this._baseTileLayer.setOptions({
+                tileUrl: this.getAzureTileUrl("microsoft.imagery"),
+                visible: true
+            });
+            this._hybridOverlayTileLayer.setOptions({
+                tileUrl: this.getAzureTileUrl("microsoft.base.hybrid.road"),
+                visible: true
+            });
+        }
+
+        this.drawCanvasOverlay();
+    }
+
+    private initAzureMap(subscriptionKey: string, topoUrl: string): void {
+        if (this._map) {
+            this._map.dispose();
+            this._map = null;
+        }
+        this._mapReady = false;
+
+        this.setStatus("Iniciando Azure Maps (Región EU)...");
+
+        atlas.setDomain("eu.atlas.microsoft.com");
+
+        this._map = new atlas.Map(this._mapContainerEl, {
+            domain: "eu.atlas.microsoft.com",
+            center: [-3.7038, 40.2],
+            zoom: 5.5,
+            language: "es-ES",
+            view: "Auto",
+            style: "road",
+            dragRotate: false,
+            pitchWithRotate: false,
+            authOptions: {
+                authType: atlas.AuthenticationType.subscriptionKey,
+                subscriptionKey: subscriptionKey
+            }
+        });
+
+        this._map.events.add("ready", () => {
+            if (!this._map) return;
+            this._mapReady = true;
+            this._map.resize();
+
+            // Inyectamos el TileLayer rasterizado oficial de Azure Maps (evita el fallo WebGL de teselas vectoriales)
+            this._baseTileLayer = new atlas.layer.TileLayer({
+                tileUrl: this.getAzureTileUrl("microsoft.base.road"),
+                tileSize: 256,
+                minSourceZoom: 1,
+                maxSourceZoom: 19,
+                opacity: 1,
+                visible: true
+            });
+
+            // Capa secundaria para superponer carreteras y nombres sobre la ortofoto satélite
+            this._hybridOverlayTileLayer = new atlas.layer.TileLayer({
+                tileUrl: this.getAzureTileUrl("microsoft.base.hybrid.road"),
+                tileSize: 256,
+                minSourceZoom: 1,
+                maxSourceZoom: 19,
+                opacity: 1,
+                visible: false
+            });
+
+            this._map.layers.add([this._baseTileLayer, this._hybridOverlayTileLayer]);
+            this.setMapStyleMode(this._currentStyleMode);
+
+            // Sincronizar el lienzo <canvas> de polígonos y burbujas en cada movimiento/render del mapa
+            const syncOverlay = (): void => {
+                this.drawCanvasOverlay();
+            };
+
+            this._map.events.add("render", syncOverlay);
+            this._map.events.add("move", syncOverlay);
+            this._map.events.add("zoom", syncOverlay);
+            this._map.events.add("moveend", syncOverlay);
+            this._map.events.add("resize", syncOverlay);
+
+            // Detectar clic sobre cualquier código postal para mostrar el popup con datos del territorio
+            this._map.events.add("click", (e) => {
+                if (e.position) {
+                    const lon = e.position[0];
+                    const lat = e.position[1];
+                    this.handleMapClickLonLat(lon, lat);
+                }
+            });
+
+            if (topoUrl) {
+                this._currentTopoUrl = topoUrl;
+                void this.loadTopoJsonFromUrl(topoUrl);
+            } else if (this._baseGeoJson) {
+                void this.refreshDataverseAndRender();
+            } else {
+                this.setStatus("Mapa listo. Pulsa '📂 Cargar TopoJSON' o configura 'topoJsonUrl'.");
+                void this.refreshDataverseAndRender();
+            }
+        });
+    }
+
+    private toggleInternalBorders(): void {
+        this._showInternalBorders = !this._showInternalBorders;
+        this._toggleBordersBtn.textContent = this._showInternalBorders
+            ? "Bordes CPs: Visibles"
+            : "Bordes CPs: Ocultos";
+        this.drawCanvasOverlay();
+    }
+
+    private cycleBadgeMode(): void {
+        if (this._badgeMode === "compact") {
+            this._badgeMode = "full";
+            this._toggleBadgesBtn.textContent = "🏷️ Etiquetas: Completas";
+        } else if (this._badgeMode === "full") {
+            this._badgeMode = "none";
+            this._toggleBadgesBtn.textContent = "🏷️ Etiquetas: Ocultas";
+        } else {
+            this._badgeMode = "compact";
+            this._toggleBadgesBtn.textContent = "🏷️ Etiquetas: Nº OTs";
+        }
+        this.drawCanvasOverlay();
     }
 
     /**
@@ -380,160 +686,6 @@ export class Territorios implements ComponentFramework.StandardControl<IInputs, 
         };
     }
 
-    private initAzureMap(subscriptionKey: string, topoUrl: string): void {
-        if (this._map) {
-            this._map.dispose();
-            this._map = null;
-        }
-
-        this.setStatus("Iniciando Azure Maps...");
-
-        this._map = new atlas.Map(this._mapContainerEl, {
-            center: [-3.7038, 40.4168], // Centro en España (Madrid)
-            zoom: 5.5,
-            language: "es-ES",
-            view: "Auto",
-            style: "grayscale_light",
-            authOptions: {
-                authType: atlas.AuthenticationType.subscriptionKey,
-                subscriptionKey: subscriptionKey
-            }
-        });
-
-        this._map.events.add("ready", () => {
-            if (!this._map) return;
-
-            this._map.controls.add(
-                [
-                    new atlas.control.ZoomControl(),
-                    new atlas.control.StyleControl({
-                        mapStyles: ["grayscale_light", "road", "grayscale_dark", "satellite_road_labels"]
-                    })
-                ],
-                { position: atlas.ControlPosition.TopRight }
-            );
-
-            this._polygonDataSource = new atlas.source.DataSource();
-            this._centroidDataSource = new atlas.source.DataSource();
-            this._map.sources.add(this._polygonDataSource);
-            this._map.sources.add(this._centroidDataSource);
-
-            this._popup = new atlas.Popup({
-                pixelOffset: [0, -10],
-                closeButton: true
-            });
-
-            // 1. Capa de relleno de polígonos
-            const polygonFillLayer = new atlas.layer.PolygonLayer(
-                this._polygonDataSource,
-                "sec-territories-fill-layer",
-                {
-                    fillColor: [
-                        "case",
-                        ["boolean", ["get", "assigned"], false],
-                        ["get", "territoryColor"],
-                        "#cbd5e1"
-                    ],
-                    fillOpacity: [
-                        "case",
-                        ["boolean", ["get", "assigned"], false],
-                        0.72,
-                        0.25
-                    ]
-                }
-            );
-
-            // 2. Capa de bordes internos de Códigos Postales
-            this._cpBorderLayer = new atlas.layer.LineLayer(
-                this._polygonDataSource,
-                "sec-cp-borders-layer",
-                {
-                    strokeColor: "#ffffff",
-                    strokeWidth: 0.5,
-                    strokeOpacity: 0.6,
-                    visible: this._showInternalBorders
-                }
-            );
-
-            // 3. Capa de burbujas en el centroide de cada territorio
-            const bubbleLayer = new atlas.layer.BubbleLayer(
-                this._centroidDataSource,
-                "sec-territory-bubbles",
-                {
-                    radius: 22,
-                    color: "#0f172a",
-                    strokeColor: ["get", "territoryColor"],
-                    strokeWidth: 3,
-                    opacity: 0.92
-                }
-            );
-
-            // 4. Capa de texto con Nombre del Territorio + Suma de OTs pendientes
-            const symbolLayer = new atlas.layer.SymbolLayer(
-                this._centroidDataSource,
-                "sec-territory-labels",
-                {
-                    iconOptions: { image: "none" },
-                    textOptions: {
-                        textField: ["get", "badgeText"],
-                        color: "#ffffff",
-                        size: 11,
-                        offset: [0, 0]
-                    }
-                }
-            );
-
-            this._map.layers.add([polygonFillLayer, this._cpBorderLayer], "labels");
-            this._map.layers.add([bubbleLayer, symbolLayer]);
-
-            // Evento click sobre un código postal / territorio
-            this._map.events.add("click", polygonFillLayer, (e) => {
-                if (e.shapes && e.shapes.length > 0 && this._popup && this._map) {
-                    const shape = e.shapes[0] as atlas.Shape;
-                    const props = shape.getProperties();
-                    const cp = props.cpCode || "Sin CP";
-                    const terrName = props.territoryName || "Sin territorio asignado";
-                    const terrColor = props.territoryColor || "#94a3b8";
-                    const pendingWOs = props.pendingWOs ?? 0;
-
-                    const html = `
-                        <div class="sec-territorios-popup">
-                            <div class="sec-territorios-popup-title">
-                                <span class="sec-territorios-color-dot" style="background:${terrColor}"></span>
-                                <span>${terrName}</span>
-                            </div>
-                            <div><strong>Código Postal:</strong> ${cp}</div>
-                            <div><strong>OTs pendientes en el territorio:</strong> ${pendingWOs}</div>
-                        </div>
-                    `;
-                    this._popup.setOptions({
-                        content: html,
-                        position: e.position
-                    });
-                    this._popup.open(this._map);
-                }
-            });
-
-            if (topoUrl) {
-                this._currentTopoUrl = topoUrl;
-                void this.loadTopoJsonFromUrl(topoUrl);
-            } else {
-                this.setStatus("Mapa listo. Pulsa '📂 Cargar TopoJSON' o configura 'topoJsonUrl'.");
-                void this.refreshDataverseAndRender();
-            }
-        });
-    }
-
-    private toggleInternalBorders(): void {
-        this._showInternalBorders = !this._showInternalBorders;
-        if (this._cpBorderLayer) {
-            this._cpBorderLayer.setOptions({ visible: this._showInternalBorders });
-        }
-        this._toggleBordersBtn.textContent = this._showInternalBorders
-            ? "Bordes CPs: Visibles"
-            : "Bordes CPs: Ocultos";
-    }
-
     private async loadTopoJsonFromUrl(url: string): Promise<void> {
         try {
             this.setStatus(`Descargando cartografía desde ${url}...`);
@@ -573,6 +725,7 @@ export class Territorios implements ComponentFramework.StandardControl<IInputs, 
 
     private parseCartographyData(rawJson: unknown): void {
         const dataObj = rawJson as { type?: string; objects?: Record<string, GeometryCollection> };
+        let rawFeatures: GeoJSON.Feature<GeoJSON.Geometry>[] = [];
 
         if (dataObj.type === "Topology" && dataObj.objects) {
             const objectKeys = Object.keys(dataObj.objects);
@@ -585,20 +738,113 @@ export class Territorios implements ComponentFramework.StandardControl<IInputs, 
                 firstLayer
             ) as unknown as GeoJSON.FeatureCollection<GeoJSON.Geometry>;
 
-            this._baseGeoJson = converted;
-            this.setStatus(`TopoJSON convertido: ${this._baseGeoJson.features.length} códigos postales cargados.`);
+            rawFeatures = converted.features || [];
         } else if (dataObj.type === "FeatureCollection") {
-            this._baseGeoJson = rawJson as GeoJSON.FeatureCollection<GeoJSON.Geometry>;
-            this.setStatus(`GeoJSON cargado: ${this._baseGeoJson.features.length} códigos postales.`);
+            const fc = rawJson as GeoJSON.FeatureCollection<GeoJSON.Geometry>;
+            rawFeatures = fc.features || [];
         } else {
             throw new Error("Formato no reconocido. Debe ser un TopoJSON o GeoJSON válido.");
+        }
+
+        this._baseGeoJson = {
+            type: "FeatureCollection",
+            features: rawFeatures
+        };
+
+        this.preparePolygonCache();
+        this.setStatus(`Cartografía lista: ${this._preparedPolygons.length.toLocaleString("es-ES")} polígonos cargados.`);
+    }
+
+    /**
+     * Precalcula los anillos y coordenadas Web Mercator de cada polígono una sola vez
+     * para pintarlos en el <canvas> a 60 FPS sin depender del WebWorker de Azure Maps.
+     */
+    private preparePolygonCache(): void {
+        this._preparedPolygons = [];
+        if (!this._baseGeoJson) return;
+
+        for (const feat of this._baseGeoJson.features) {
+            const geom = feat?.geometry;
+            if (!geom) continue;
+
+            const cpCode = this.extractPostalCode(feat);
+            const rawRings: number[][][] = [];
+
+            if (geom.type === "Polygon" && Array.isArray(geom.coordinates)) {
+                for (const ring of geom.coordinates) {
+                    if (Array.isArray(ring) && ring.length >= 3) {
+                        rawRings.push(ring);
+                    }
+                }
+            } else if (geom.type === "MultiPolygon" && Array.isArray(geom.coordinates)) {
+                for (const poly of geom.coordinates) {
+                    if (Array.isArray(poly)) {
+                        for (const ring of poly) {
+                            if (Array.isArray(ring) && ring.length >= 3) {
+                                rawRings.push(ring);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (rawRings.length === 0) continue;
+
+            const ringsLonLat: [number, number][][] = [];
+            const ringsMercator: [number, number][][] = [];
+            let minLon = 180;
+            let minLat = 90;
+            let maxLon = -180;
+            let maxLat = -90;
+
+            for (const ring of rawRings) {
+                const llRing: [number, number][] = [];
+                const mercRing: [number, number][] = [];
+
+                for (const pt of ring) {
+                    const lon = Number(pt[0]);
+                    const lat = Number(pt[1]);
+                    if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue;
+
+                    llRing.push([lon, lat]);
+                    mercRing.push([this.lonToMercatorX(lon), this.latToMercatorY(lat)]);
+
+                    if (lon < minLon) minLon = lon;
+                    if (lat < minLat) minLat = lat;
+                    if (lon > maxLon) maxLon = lon;
+                    if (lat > maxLat) maxLat = lat;
+                }
+
+                if (llRing.length >= 3) {
+                    ringsLonLat.push(llRing);
+                    ringsMercator.push(mercRing);
+                }
+            }
+
+            if (ringsMercator.length === 0) continue;
+
+            this._preparedPolygons.push({
+                cpCode,
+                territoryId: "",
+                assigned: false,
+                ringsLonLat,
+                ringsMercator,
+                minLon,
+                minLat,
+                maxLon,
+                maxLat,
+                minMx: this.lonToMercatorX(minLon),
+                minMy: this.latToMercatorY(maxLat),
+                maxMx: this.lonToMercatorX(maxLon),
+                maxMy: this.latToMercatorY(minLat)
+            });
         }
     }
 
     /**
-     * Consulta en Dataverse alineada con el FetchXML de msdyn_postalcode:
-     * - msdyn_postalcode: msdyn_postalcodeid, msdyn_name, _msdyn_serviceterritory_value (statecode eq 0)
+     * Consulta en Dataverse sin ningún escape '\$' innecesario en las cadenas OData:
      * - territory: territoryid, name
+     * - msdyn_postalcode: msdyn_postalcodeid, msdyn_name, _msdyn_serviceterritory_value (statecode eq 0)
      * - msdyn_workorder: suma agregada por msdyn_serviceterritory (msdyn_systemstatus = 690970000, statecode = 0)
      */
     private async refreshDataverseAndRender(): Promise<void> {
@@ -610,11 +856,12 @@ export class Territorios implements ComponentFramework.StandardControl<IInputs, 
             const territoriesMap = new Map<string, TerritoryInfo>();
             const cpToTerritory = new Map<string, string>();
 
-            // 1. Consultar Territorios (territory)
+            // 1. Consultar Territorios (sin escapes innecesarios en $select ni$orderby)
+            const territoryQuery = "?$select=territoryid,name&$orderby=name asc";
             const territoryResult = await this.queryDataverse(
                 "territory",
                 "territories",
-                "?$select=territoryid,name&$orderby=name asc"
+                territoryQuery
             );
 
             territoryResult.entities.forEach((ent, index) => {
@@ -622,23 +869,25 @@ export class Territorios implements ComponentFramework.StandardControl<IInputs, 
                 const name = String(ent.name || `Territorio ${index + 1}`);
                 const color = TERRITORY_PALETTE[index % TERRITORY_PALETTE.length];
 
-                territoriesMap.set(id, {
-                    id,
-                    name,
-                    color,
-                    pendingWOs: 0,
-                    postalCodesCount: 0,
-                    sumLon: 0,
-                    sumLat: 0,
-                    sampleCount: 0,
-                    minLon: 180,
-                    minLat: 90,
-                    maxLon: -180,
-                    maxLat: -90
-                });
+                if (id) {
+                    territoriesMap.set(id, {
+                        id,
+                        name,
+                        color,
+                        pendingWOs: 0,
+                        postalCodesCount: 0,
+                        sumLon: 0,
+                        sumLat: 0,
+                        sampleCount: 0,
+                        minLon: 180,
+                        minLat: 90,
+                        maxLon: -180,
+                        maxLat: -90
+                    });
+                }
             });
 
-            // 2. Consultar Códigos Postales (msdyn_postalcode) con los nombres exactos del FetchXML
+            // 2. Consultar Códigos Postales con los nombres exactos del FetchXML
             let nextQueryOrUrl =
                 "?$select=msdyn_postalcodeid,msdyn_name,_msdyn_serviceterritory_value,statecode" +
                 "&$filter=statecode eq 0 and _msdyn_serviceterritory_value ne null" +
@@ -665,7 +914,7 @@ export class Territorios implements ComponentFramework.StandardControl<IInputs, 
                         (ent.msdyn_serviceterritory as string | undefined);
 
                     if (rawCp && rawTerrId) {
-                        const normalizedCp = rawCp.padStart(5, "0");
+                        const normalizedCp = this.normalizePostalCodeString(rawCp);
                         const cleanTerrId = this.cleanGuid(rawTerrId);
                         cpToTerritory.set(normalizedCp, cleanTerrId);
 
@@ -739,19 +988,23 @@ export class Territorios implements ComponentFramework.StandardControl<IInputs, 
             this._territoriesMap = territoriesMap;
             this._cpToTerritoryMap = cpToTerritory;
 
-            if (this._territoriesMap.size === 0 && this._baseGeoJson) {
-                this.setStatus(`Sin territorios devueltos en ${targetLabel}. Puedes pulsar '⚡ Simular (Test)'.`);
+            if (this._cpToTerritoryMap.size === 0 && this._preparedPolygons.length > 0) {
+                this.applyDemoTerritories();
             } else {
-                this.renderCartographyOnMap();
+                this.bindTerritoriesToPolygonsAndRender();
             }
         } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            this.setStatus(`⚠️ ${msg}`);
+            if (this._preparedPolygons.length > 0 && this._cpToTerritoryMap.size === 0) {
+                this.applyDemoTerritories();
+            } else {
+                const msg = err instanceof Error ? err.message : String(err);
+                this.setStatus(`⚠️ ${msg}`);
+            }
         }
     }
 
     private applyDemoTerritories(): void {
-        if (!this._baseGeoJson) {
+        if (this._preparedPolygons.length === 0) {
             this.setStatus("⚠️ Primero carga tu archivo TopoJSON con el botón '📂 Cargar TopoJSON'.");
             return;
         }
@@ -785,21 +1038,24 @@ export class Territorios implements ComponentFramework.StandardControl<IInputs, 
             });
         }
 
-        for (const feat of this._baseGeoJson.features) {
-            const cp = this.extractPostalCode(feat);
-            if (!cp) continue;
-            const prefix = cp.substring(0, 2);
+        for (const poly of this._preparedPolygons) {
+            if (!poly.cpCode) continue;
+            const prefix = poly.cpCode.substring(0, 2);
             const matched = demoDefs.find((d) => d.prefixes.includes(prefix));
             if (matched) {
-                this._cpToTerritoryMap.set(cp, matched.id);
+                this._cpToTerritoryMap.set(poly.cpCode, matched.id);
             }
         }
 
-        this.renderCartographyOnMap();
+        this.bindTerritoriesToPolygonsAndRender();
     }
 
-    private renderCartographyOnMap(): void {
-        if (!this._baseGeoJson || !this._polygonDataSource || !this._centroidDataSource) {
+    /**
+     * Vincula cada polígono de código postal con su territorio de Dataverse,
+     * calcula los límites geográficos de cada territorio y lanza el pintado en el <canvas>.
+     */
+    private bindTerritoriesToPolygonsAndRender(): void {
+        if (this._preparedPolygons.length === 0) {
             return;
         }
 
@@ -816,73 +1072,365 @@ export class Territorios implements ComponentFramework.StandardControl<IInputs, 
 
         let assignedCount = 0;
 
-        for (const feature of this._baseGeoJson.features) {
-            const cpCode = this.extractPostalCode(feature);
-            const territoryId = cpCode ? this._cpToTerritoryMap.get(cpCode) : undefined;
+        for (const poly of this._preparedPolygons) {
+            const territoryId = poly.cpCode ? this._cpToTerritoryMap.get(poly.cpCode) : undefined;
             const territory = territoryId ? this._territoriesMap.get(territoryId) : undefined;
 
             if (territory) {
                 assignedCount++;
                 territory.postalCodesCount++;
+                poly.assigned = true;
+                poly.territoryId = territory.id;
 
-                feature.properties = {
-                    ...feature.properties,
-                    cpCode,
-                    assigned: true,
-                    territoryId: territory.id,
-                    territoryName: territory.name,
-                    territoryColor: territory.color,
-                    pendingWOs: territory.pendingWOs
-                };
+                const centerLon = (poly.minLon + poly.maxLon) * 0.5;
+                const centerLat = (poly.minLat + poly.maxLat) * 0.5;
 
-                const samplePt = this.getFirstCoordinate(feature.geometry);
-                if (samplePt) {
-                    const [lon, lat] = samplePt;
-                    territory.sumLon += lon;
-                    territory.sumLat += lat;
-                    territory.sampleCount++;
-                    if (lon < territory.minLon) territory.minLon = lon;
-                    if (lat < territory.minLat) territory.minLat = lat;
-                    if (lon > territory.maxLon) territory.maxLon = lon;
-                    if (lat > territory.maxLat) territory.maxLat = lat;
-                }
+                territory.sumLon += centerLon;
+                territory.sumLat += centerLat;
+                territory.sampleCount++;
+
+                if (poly.minLon < territory.minLon) territory.minLon = poly.minLon;
+                if (poly.minLat < territory.minLat) territory.minLat = poly.minLat;
+                if (poly.maxLon > territory.maxLon) territory.maxLon = poly.maxLon;
+                if (poly.maxLat > territory.maxLat) territory.maxLat = poly.maxLat;
             } else {
-                feature.properties = {
-                    ...feature.properties,
-                    cpCode,
-                    assigned: false,
-                    territoryName: "No asignado",
-                    territoryColor: "#cbd5e1",
-                    pendingWOs: 0
-                };
+                poly.assigned = false;
+                poly.territoryId = "";
             }
         }
 
-        this._polygonDataSource.clear();
-        this._polygonDataSource.add(this._baseGeoJson as unknown as atlas.data.FeatureCollection);
-
-        this._centroidDataSource.clear();
-        this._territoriesMap.forEach((terr) => {
-            if (terr.sampleCount > 0) {
-                const centerLon = terr.sumLon / terr.sampleCount;
-                const centerLat = terr.sumLat / terr.sampleCount;
-
-                this._centroidDataSource!.add(
-                    new atlas.data.Feature(new atlas.data.Point([centerLon, centerLat]), {
-                        territoryId: terr.id,
-                        territoryName: terr.name,
-                        territoryColor: terr.color,
-                        pendingWOs: terr.pendingWOs,
-                        badgeText: `${terr.name}\n${terr.pendingWOs} OTs`
-                    })
-                );
-            }
-        });
-
         this.renderLegendSidebar();
+        this.drawCanvasOverlay();
         this.setStatus(
             `✅ ${this._territoriesMap.size} territorios | ${assignedCount.toLocaleString("es-ES")} CPs pintados`
         );
+    }
+
+    /**
+     * Pinta los 10.874 polígonos agrupados por territorio y los indicadores de OTs
+     * directamente en el <canvas> 2D sincronizado con la cámara de Azure Maps.
+     */
+    private drawCanvasOverlay(): void {
+        if (!this._overlayCanvasEl || !this._mapStageEl || !this._map || !this._mapReady) {
+            return;
+        }
+
+        const width = this._mapStageEl.clientWidth;
+        const height = this._mapStageEl.clientHeight;
+        if (width <= 0 || height <= 0) return;
+
+        const dpr = window.devicePixelRatio || 1;
+        const targetW = Math.round(width * dpr);
+        const targetH = Math.round(height * dpr);
+
+        if (this._overlayCanvasEl.width !== targetW || this._overlayCanvasEl.height !== targetH) {
+            this._overlayCanvasEl.width = targetW;
+            this._overlayCanvasEl.height = targetH;
+        }
+
+        const ctx = this._overlayCanvasEl.getContext("2d");
+        if (!ctx) return;
+
+        ctx.save();
+        ctx.scale(dpr, dpr);
+        ctx.clearRect(0, 0, width, height);
+
+        if (this._preparedPolygons.length === 0) {
+            ctx.restore();
+            return;
+        }
+
+        // Obtener factor de escala exacto desde positionsToPixels de Azure Maps
+        const proj = this.computeScreenProjection(width, height);
+        if (!proj) {
+            ctx.restore();
+            return;
+        }
+
+        const { scaleX, offsetX, scaleY, offsetY } = proj;
+
+        // 1. Agrupar polígonos visibles por territorio para hacer 1 solo fill() por territorio (máximo rendimiento y color uniforme)
+        const buckets = new Map<string, PreparedPolygon[]>();
+        const unassignedPolys: PreparedPolygon[] = [];
+
+        for (const poly of this._preparedPolygons) {
+            const pMinX = poly.minMx * scaleX + offsetX;
+            const pMaxX = poly.maxMx * scaleX + offsetX;
+            const pMinY = poly.minMy * scaleY + offsetY;
+            const pMaxY = poly.maxMy * scaleY + offsetY;
+
+            // Descartar polígonos fuera del encuadre actual de pantalla
+            if (pMaxX < -10 || pMinX > width + 10 || pMaxY < -10 || pMinY > height + 10) {
+                continue;
+            }
+
+            if (poly.assigned && poly.territoryId) {
+                let list = buckets.get(poly.territoryId);
+                if (!list) {
+                    list = [];
+                    buckets.set(poly.territoryId, list);
+                }
+                list.push(poly);
+            } else {
+                unassignedPolys.push(poly);
+            }
+        }
+
+        // 2. Pintar polígonos sin territorio asignado en gris muy suave
+        if (unassignedPolys.length > 0) {
+            ctx.beginPath();
+            for (const poly of unassignedPolys) {
+                this.tracePolygonPath(ctx, poly, scaleX, offsetX, scaleY, offsetY);
+            }
+            ctx.fillStyle = "rgba(148, 163, 184, 0.18)";
+            ctx.fill();
+        }
+
+        // 3. Pintar cada territorio con su color asignado
+        buckets.forEach((polys, territoryId) => {
+            const terr = this._territoriesMap.get(territoryId);
+            const colorHex = terr ? terr.color : "#2563eb";
+
+            ctx.beginPath();
+            for (const poly of polys) {
+                this.tracePolygonPath(ctx, poly, scaleX, offsetX, scaleY, offsetY);
+            }
+
+            ctx.fillStyle = this.hexToRgba(colorHex, 0.56);
+            ctx.fill();
+
+            if (this._showInternalBorders) {
+                ctx.strokeStyle = "rgba(255, 255, 255, 0.65)";
+                ctx.lineWidth = 0.6;
+                ctx.stroke();
+            } else {
+                // Trazo del mismo color para sellar las uniones entre códigos postales colindantes
+                ctx.strokeStyle = this.hexToRgba(colorHex, 0.75);
+                ctx.lineWidth = 0.7;
+                ctx.stroke();
+            }
+        });
+
+        // 4. Si hay un código postal seleccionado con clic, resaltar su silueta en blanco y negro
+        if (this._selectedCpPolygon) {
+            ctx.beginPath();
+            this.tracePolygonPath(ctx, this._selectedCpPolygon, scaleX, offsetX, scaleY, offsetY);
+            ctx.strokeStyle = "#0f172a";
+            ctx.lineWidth = 2.2;
+            ctx.stroke();
+        }
+
+        // 5. Pintar las burbujas / etiquetas con la suma de OTs pendientes en el centroide de cada territorio
+        if (this._badgeMode !== "none") {
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+
+            this._territoriesMap.forEach((terr) => {
+                if (terr.sampleCount <= 0) return;
+
+                const centerLon = terr.sumLon / terr.sampleCount;
+                const centerLat = terr.sumLat / terr.sampleCount;
+                const cx = this.lonToMercatorX(centerLon) * scaleX + offsetX;
+                const cy = this.latToMercatorY(centerLat) * scaleY + offsetY;
+
+                if (cx < -40 || cx > width + 40 || cy < -40 || cy > height + 40) {
+                    return;
+                }
+
+                if (this._badgeMode === "compact") {
+                    const label = `${terr.pendingWOs}`;
+                    ctx.font = "700 11px 'Segoe UI', sans-serif";
+                    const textW = ctx.measureText(label).width;
+                    const pillW = Math.max(28, textW + 14);
+                    const pillH = 22;
+
+                    this.drawRoundedRect(ctx, cx - pillW / 2, cy - pillH / 2, pillW, pillH, 11);
+                    ctx.fillStyle = "rgba(15, 23, 42, 0.9)";
+                    ctx.fill();
+                    ctx.strokeStyle = terr.color;
+                    ctx.lineWidth = 2.2;
+                    ctx.stroke();
+
+                    ctx.fillStyle = "#ffffff";
+                    ctx.fillText(label, cx, cy + 0.5);
+                } else {
+                    const line1 = terr.name.length > 16 ? terr.name.substring(0, 15) + "…" : terr.name;
+                    const line2 = `${terr.pendingWOs} OTs`;
+                    ctx.font = "700 11px 'Segoe UI', sans-serif";
+                    const w1 = ctx.measureText(line1).width;
+                    const w2 = ctx.measureText(line2).width;
+                    const pillW = Math.max(w1, w2) + 18;
+                    const pillH = 34;
+
+                    this.drawRoundedRect(ctx, cx - pillW / 2, cy - pillH / 2, pillW, pillH, 8);
+                    ctx.fillStyle = "rgba(15, 23, 42, 0.92)";
+                    ctx.fill();
+                    ctx.strokeStyle = terr.color;
+                    ctx.lineWidth = 2.2;
+                    ctx.stroke();
+
+                    ctx.fillStyle = "#ffffff";
+                    ctx.fillText(line1, cx, cy - 6);
+                    ctx.font = "600 10px 'Segoe UI', sans-serif";
+                    ctx.fillStyle = "#93c5fd";
+                    ctx.fillText(line2, cx, cy + 8);
+                }
+            });
+        }
+
+        // 6. Actualizar posición en pantalla del popup flotante si está abierto
+        if (this._popupPositionLonLat && this._floatingPopupEl.classList.contains("open")) {
+            const px = this.lonToMercatorX(this._popupPositionLonLat[0]) * scaleX + offsetX;
+            const py = this.latToMercatorY(this._popupPositionLonLat[1]) * scaleY + offsetY;
+            this._floatingPopupEl.style.left = `${px}px`;
+            this._floatingPopupEl.style.top = `${py}px`;
+        }
+
+        ctx.restore();
+    }
+
+    private tracePolygonPath(
+        ctx: CanvasRenderingContext2D,
+        poly: PreparedPolygon,
+        scaleX: number,
+        offsetX: number,
+        scaleY: number,
+        offsetY: number
+    ): void {
+        for (const ring of poly.ringsMercator) {
+            if (ring.length < 3) continue;
+            ctx.moveTo(ring[0][0] * scaleX + offsetX, ring[0][1] * scaleY + offsetY);
+            for (let i = 1; i < ring.length; i++) {
+                ctx.lineTo(ring[i][0] * scaleX + offsetX, ring[i][1] * scaleY + offsetY);
+            }
+            ctx.closePath();
+        }
+    }
+
+    private computeScreenProjection(
+        width: number,
+        height: number
+    ): { scaleX: number; offsetX: number; scaleY: number; offsetY: number } | null {
+        if (!this._map) return null;
+
+        try {
+            const pixels = this._map.positionsToPixels([this._refPoint1, this._refPoint2]);
+            if (pixels && pixels.length === 2) {
+                const p1 = pixels[0];
+                const p2 = pixels[1];
+                const dMx = this._refMerc2[0] - this._refMerc1[0];
+                const dMy = this._refMerc2[1] - this._refMerc1[1];
+
+                if (Math.abs(dMx) > 1e-9 && Math.abs(dMy) > 1e-9) {
+                    const scaleX = (p2[0] - p1[0]) / dMx;
+                    const scaleY = (p2[1] - p1[1]) / dMy;
+                    if (Number.isFinite(scaleX) && Number.isFinite(scaleY) && Math.abs(scaleX) > 1) {
+                        return {
+                            scaleX,
+                            offsetX: p1[0] - this._refMerc1[0] * scaleX,
+                            scaleY,
+                            offsetY: p1[1] - this._refMerc1[1] * scaleY
+                        };
+                    }
+                }
+            }
+        } catch {
+            // Fallback por cámara si positionsToPixels no está listo en el primer fotograma
+        }
+
+        const cam = this._map.getCamera();
+        const center = cam.center || [-3.7038, 40.2];
+        const zoom = cam.zoom ?? 5.5;
+        const worldSize = 512 * Math.pow(2, zoom);
+        const centerMx = this.lonToMercatorX(center[0]);
+        const centerMy = this.latToMercatorY(center[1]);
+
+        return {
+            scaleX: worldSize,
+            offsetX: width * 0.5 - centerMx * worldSize,
+            scaleY: worldSize,
+            offsetY: height * 0.5 - centerMy * worldSize
+        };
+    }
+
+    /**
+     * Busca qué polígono de código postal contiene las coordenadas [lon, lat] donde se hizo clic
+     */
+    private handleMapClickLonLat(lon: number, lat: number): void {
+        let hitPoly: PreparedPolygon | null = null;
+
+        for (const poly of this._preparedPolygons) {
+            if (lon < poly.minLon || lon > poly.maxLon || lat < poly.minLat || lat > poly.maxLat) {
+                continue;
+            }
+            for (const ring of poly.ringsLonLat) {
+                if (this.isPointInRing(lon, lat, ring)) {
+                    hitPoly = poly;
+                    break;
+                }
+            }
+            if (hitPoly) break;
+        }
+
+        if (!hitPoly) {
+            this._selectedCpPolygon = null;
+            this._popupPositionLonLat = null;
+            this._floatingPopupEl.classList.remove("open");
+            this.drawCanvasOverlay();
+            return;
+        }
+
+        this._selectedCpPolygon = hitPoly;
+        this._popupPositionLonLat = [lon, lat];
+
+        const terr = hitPoly.territoryId ? this._territoriesMap.get(hitPoly.territoryId) : undefined;
+        const terrName = terr ? terr.name : "Sin territorio asignado";
+        const terrColor = terr ? terr.color : "#94a3b8";
+        const pendingWOs = terr ? terr.pendingWOs : 0;
+        const totalCps = terr ? terr.postalCodesCount : 0;
+
+        this._floatingPopupEl.innerHTML = `
+            <div class="sec-territorios-popup-header">
+                <div class="sec-territorios-popup-title">
+                    <span class="sec-territorios-color-dot" style="background:${terrColor}"></span>
+                    <span>${terrName}</span>
+                </div>
+                <button type="button" class="sec-territorios-popup-close" title="Cerrar">✕</button>
+            </div>
+            <div><strong>Código Postal:</strong> ${hitPoly.cpCode || "N/D"}</div>
+            <div><strong>OTs pendientes territorio:</strong> ${pendingWOs}</div>
+            <div><strong>CPs en el territorio:</strong> ${totalCps.toLocaleString("es-ES")}</div>
+        `;
+
+        const closeBtn = this._floatingPopupEl.querySelector(".sec-territorios-popup-close");
+        if (closeBtn) {
+            closeBtn.addEventListener("click", (ev) => {
+                ev.stopPropagation();
+                this._selectedCpPolygon = null;
+                this._popupPositionLonLat = null;
+                this._floatingPopupEl.classList.remove("open");
+                this.drawCanvasOverlay();
+            });
+        }
+
+        this._floatingPopupEl.classList.add("open");
+        this.drawCanvasOverlay();
+    }
+
+    private isPointInRing(lon: number, lat: number, ring: [number, number][]): boolean {
+        let inside = false;
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+            const xi = ring[i][0];
+            const yi = ring[i][1];
+            const xj = ring[j][0];
+            const yj = ring[j][1];
+
+            const intersect =
+                yi > lat !== yj > lat &&
+                lon < ((xj - xi) * (lat - yi)) / (yj - yi + 1e-12) + xi;
+            if (intersect) inside = !inside;
+        }
+        return inside;
     }
 
     private renderLegendSidebar(): void {
@@ -907,10 +1455,10 @@ export class Territorios implements ComponentFramework.StandardControl<IInputs, 
             item.addEventListener("click", () => {
                 if (this._map && terr.sampleCount > 0) {
                     this._map.setCamera({
-                        bounds: [terr.minLon - 0.3, terr.minLat - 0.3, terr.maxLon + 0.3, terr.maxLat + 0.3],
+                        bounds: [terr.minLon - 0.25, terr.minLat - 0.25, terr.maxLon + 0.25, terr.maxLat + 0.25],
                         padding: 40,
                         type: "ease",
-                        duration: 800
+                        duration: 600
                     });
                 }
             });
@@ -921,28 +1469,75 @@ export class Territorios implements ComponentFramework.StandardControl<IInputs, 
 
     private extractPostalCode(feature: GeoJSON.Feature): string {
         const props = (feature.properties || {}) as Record<string, unknown>;
-        const raw =
+        let raw: unknown =
             props.COD_POSTAL ??
             props.cod_postal ??
             props.CP ??
             props.cp ??
             props.postalcode ??
             props.codigo_postal ??
-            feature.id ??
-            "";
-        const str = String(raw).trim();
-        return str ? str.padStart(5, "0") : "";
+            props.msdyn_name ??
+            feature.id;
+
+        if (raw === undefined || raw === null || raw === "") {
+            for (const val of Object.values(props)) {
+                const candidate = String(val ?? "").trim();
+                if (/^\d{4,5}\$/.test(candidate)) {
+                    raw = candidate;
+                    break;
+                }
+            }
+        }
+
+        return this.normalizePostalCodeString(String(raw ?? ""));
     }
 
-    private getFirstCoordinate(geometry: GeoJSON.Geometry | null): [number, number] | null {
-        if (!geometry) return null;
-        if (geometry.type === "Polygon" && geometry.coordinates[0]?.[0]) {
-            return [geometry.coordinates[0][0][0], geometry.coordinates[0][0][1]];
-        }
-        if (geometry.type === "MultiPolygon" && geometry.coordinates[0]?.[0]?.[0]) {
-            return [geometry.coordinates[0][0][0][0], geometry.coordinates[0][0][0][1]];
-        }
-        return null;
+    private normalizePostalCodeString(raw: string): string {
+        const trimmed = raw.trim();
+        if (!trimmed) return "";
+        const digitsMatch = trimmed.match(/\d+/);
+        if (!digitsMatch) return trimmed;
+        return digitsMatch[0].padStart(5, "0");
+    }
+
+    private lonToMercatorX(lon: number): number {
+        return (lon + 180) / 360;
+    }
+
+    private latToMercatorY(lat: number): number {
+        const clamped = Math.max(-85.05112878, Math.min(85.05112878, lat));
+        const sinLat = Math.sin((clamped * Math.PI) / 180);
+        return 0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI);
+    }
+
+    private hexToRgba(hex: string, alpha: number): string {
+        const clean = hex.replace("#", "");
+        const num = parseInt(clean, 16);
+        const r = (num >> 16) & 255;
+        const g = (num >> 8) & 255;
+        const b = num & 255;
+        return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+    }
+
+    private drawRoundedRect(
+        ctx: CanvasRenderingContext2D,
+        x: number,
+        y: number,
+        w: number,
+        h: number,
+        r: number
+    ): void {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + w - r, y);
+        ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+        ctx.lineTo(x + r, y + h);
+        ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+        ctx.lineTo(x, y + r);
+        ctx.quadraticCurveTo(x, y, x + r, y);
+        ctx.closePath();
     }
 
     private cleanParam(val: string | null | undefined): string {
@@ -975,6 +1570,10 @@ export class Territorios implements ComponentFramework.StandardControl<IInputs, 
     }
 
     public destroy(): void {
+        if (this._resizeObserver) {
+            this._resizeObserver.disconnect();
+            this._resizeObserver = null;
+        }
         if (this._map) {
             this._map.dispose();
             this._map = null;
