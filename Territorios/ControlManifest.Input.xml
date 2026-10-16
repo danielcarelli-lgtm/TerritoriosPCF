@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8" ?>
 <manifest>
-  <control namespace="sec" constructor="Territorios" version="0.0.7" display-name-key="Territorios" description-key="Mapa de Territorios de Field Service por Códigos Postales con Azure Maps" control-type="standard">
+  <control namespace="sec" constructor="Territorios" version="0.0.10" display-name-key="Territorios" description-key="Mapa de Territorios de Field Service por Códigos Postales con Azure Maps" control-type="standard">
     <external-service-usage enabled="true">
       <domain>atlas.microsoft.com</domain>
       <domain>eu.atlas.microsoft.com</domain>

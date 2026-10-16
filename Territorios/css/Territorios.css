@@ -149,7 +149,6 @@
     height: 100%;
 }
 
-/* Lienzo HTML5 superpuesto que pinta los 10.874 polígonos y burbujas evitando el WebWorker roto */
 .sec-territorios-overlay-canvas {
     position: absolute;
     top: 0;
@@ -160,7 +159,6 @@
     z-index: 6;
 }
 
-/* Controles flotantes de tipo de mapa (Calles / Oscuro / Satélite) y Zoom */
 .sec-territorios-map-controls {
     position: absolute;
     top: 12px;
@@ -243,8 +241,8 @@
 .sec-territorios-floating-popup {
     position: absolute;
     display: none;
-    min-width: 210px;
-    max-width: 280px;
+    min-width: 265px;
+    max-width: 320px;
     background: #ffffff;
     border: 1px solid #cbd5e1;
     border-radius: 8px;
@@ -287,8 +285,31 @@
     padding: 0 4px;
 }
 
+.sec-territorios-popup-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px 8px;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid #e2e8f0;
+    font-size: 11px;
+}
+
+.sec-territorios-popup-total-row {
+    grid-column: 1 / -1;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 4px;
+    padding-top: 6px;
+    border-top: 1px dashed #cbd5e1;
+    font-weight: 700;
+    font-size: 12px;
+}
+
+/* Barra lateral derecha de Territorios */
 .sec-territorios-sidebar {
-    width: 280px;
+    width: 350px;
     background: #ffffff;
     border-left: 1px solid #e2e8f0;
     display: flex;
@@ -299,7 +320,7 @@
 
 .sec-territorios-sidebar-header {
     padding: 10px 12px;
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -308,31 +329,40 @@
     border-bottom: 1px solid #e2e8f0;
     display: flex;
     justify-content: space-between;
+    align-items: center;
 }
 
 .sec-territorios-legend-list {
     flex: 1;
     overflow-y: auto;
-    padding: 8px 8px 24px 8px;
+    padding: 8px 8px 28px 8px;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 8px;
 }
 
 .sec-territorios-legend-item {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 8px 10px;
+    flex-direction: column;
+    gap: 6px;
+    padding: 9px 10px;
     border-radius: 6px;
     border: 1px solid #e2e8f0;
     background: #ffffff;
     cursor: pointer;
-    transition: background-color 0.15s ease, transform 0.1s ease;
+    transition: background-color 0.15s ease, border-color 0.15s ease;
 }
 
 .sec-territorios-legend-item:hover {
-    background-color: #f1f5f9;
+    background-color: #f8fafc;
+    border-color: #94a3b8;
+}
+
+.sec-territorios-legend-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
 }
 
 .sec-territorios-legend-left {
@@ -340,6 +370,7 @@
     align-items: center;
     gap: 8px;
     overflow: hidden;
+    min-width: 0;
 }
 
 .sec-territorios-color-dot {
@@ -364,14 +395,59 @@
     color: #64748b;
 }
 
-.sec-territorios-badge {
+.sec-territorios-badge-total {
     font-size: 11px;
     font-weight: 700;
-    padding: 3px 8px;
+    padding: 2px 8px;
     border-radius: 999px;
     background-color: #0f172a;
     color: #ffffff;
     flex-shrink: 0;
+}
+
+/* Cuadrícula con los 6 sub-valores (PCI Cad/NoCad, SE Cad/NoCad, Total Cad/NoCad) */
+.sec-territorios-metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 4px 6px;
+    padding-top: 6px;
+    border-top: 1px solid #f1f5f9;
+    font-size: 11px;
+}
+
+.sec-territorios-metric-pill {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-weight: 600;
+}
+
+.sec-territorios-metric-expired {
+    background-color: #fef2f2;
+    color: #b91c1c;
+    border: 1px solid #fecaca;
+}
+
+.sec-territorios-metric-ok {
+    background-color: #f0fdf4;
+    color: #15803d;
+    border: 1px solid #bbf7d0;
+}
+
+.sec-territorios-metric-total-exp {
+    background-color: #fff1f2;
+    color: #9f1239;
+    border: 1px solid #fda4af;
+    font-weight: 700;
+}
+
+.sec-territorios-metric-total-ok {
+    background-color: #ecfdf5;
+    color: #065f46;
+    border: 1px solid #6ee7b7;
+    font-weight: 700;
 }
 
 /* Etiqueta de versionado abajo a la derecha, pequeña y en gris */
